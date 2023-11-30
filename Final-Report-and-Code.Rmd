@@ -9,22 +9,170 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+# Research Question 1: How does the size distribution of the smooth galaxies and the featured galaxies differ, and how can this be compared using linear regression with indicator variables?
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+In this study, we will construct a model in which we can compare the size distributions between the smooth and featured galaxies. We will be using a linear model with indicator variables, setting a baseline value and comparing it with an indicator value in order to compare the two values.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+We must select a p-value threshold in our statistical tests before we construct our models at which to reject or accept the p-value. We will set the alpha value at 0.05, meaning that if our p-value is less than 0.05, we will reject the null hypothesis, and if our p-value is higher than 0.05, we will accept the null hypothesis.
 
-```{r cars}
-summary(cars)
+```{r, message=FALSE}
+library(tidyverse)
+library(rpart)
+library(partykit)
+library(dplyr)
+library(arrow)
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+gz2 <- read_parquet("gz2_catalog_with_modern_schema_no_paths.parquet")
+nsa <- read_parquet("nsa_v1_0_1_key_cols.parquet")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+nsa <- nsa %>% filter(!is.na(sersic_nmgy_r))
+gz2 <- gz2 %>% mutate(
+  smooth_or_not = ifelse(`smooth-or-featured-gz2_smooth` > `smooth-or-featured-gz2_featured-or-disk` + `smooth-or-featured-gz2_artifact`, 
+                         yes = 'smooth', no = 'featured')
+)
+```
+
+```{r}
+galaxy_data <- merge(gz2, nsa, by = "iauname")
+```
+
+```{r}
+galaxy_data %>% group_by(smooth_or_not) %>%
+  summarise(mean = mean(petro_theta))
+
+galaxy_data %>% filter(smooth_or_not == "smooth") %>%
+  ggplot() +
+  aes(x = petro_theta) +
+  geom_histogram() +
+  labs(title = "Smooth Size Distributions") +
+  xlim(0, 50)
+
+galaxy_data %>% filter(smooth_or_not == "featured") %>%
+  ggplot() +
+  aes(x = petro_theta) +
+  geom_histogram() +
+  labs(title = "Non-smooth size distributions") +
+  xlim(0, 50)
+```
+
+```{r}
+size_mod <- lm(petro_theta ~ smooth_or_not, data = galaxy_data)
+summary(size_mod)
+```
+
+#The results
+
+In our linear regression model, we have used the indicator variable of smooth_or_not in order to find the relation between differing levels of smoothness and the size of petro_theta.
+
+```{r}
+
+galaxy_data_smaller <- galaxy_data[sample(nrow(galaxy_data), 500), ]
+
+galaxy_data_smaller %>% ggplot(aes(x = sersic_nmgy_r, y = petro_theta, color = smooth_or_not)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, size = 1.5) +
+  labs(x = "sersic_nmgy_r", y = "petro_theta") +
+  scale_color_manual(values = c("blue", "pink")) +
+  theme_classic() + 
+  xlim(0, 750) +
+  ylim(0, 20)
+
+galaxy_data_smaller %>% ggplot(aes(x = smooth_or_not, y = petro_theta, fill = smooth_or_not)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("#E69F00", "#56B4E9", "#009E73")) +
+  labs(x = "Smooth or Featured", y = "Petro_theta", fill = "Smooth or Featured") +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("Smooth vs Featured Size Distributions") +
+  ylim(0, 50)
+```
+
+## Research Question 2:  What factors finally decided smooth/feature in galaxies? (Classification tree)
+
+This question focuses on the Galaxy Zoo data set.
+
+
+Step#1: Perform feature engineering to find important features
+
+With the data, we use the histogram to look at two populations: smooth galaxies and featured galaxies. To find whether the galaxies are smooth or feature, we use the `smooth-or-featured-gz2_total-votes`column, which means we want to check the total number of votes on this question per galaxy.
+
+```{r}
+galaxy_data %>% ggplot() + aes(x = `smooth-or-featured-gz2_total-votes`) + geom_histogram()
+```
+
+
+We use "mutate()" and "case_when()" functions to create the new variable called smoothish that splits the `galazy_zoo` data set into two samples: a "smooth" sample and a "featured" sample. So, we define whether a galaxy is above or below 0.5 in the column `smooth-or-featured-gz2_smooth_fraction` and use the "filter()" function to find the row `smooth-or-featured-gz2_total-votes` greater than 10 and save these into a new data set called `gz_smoothosh`. Finally, visualize the relative number of galaxies in each group.
+```{r}
+gz_smoothosh <- galaxy_data %>% filter(`smooth-or-featured-gz2_total-votes` > 10) %>% mutate(smoothish=case_when(`smooth-or-featured-gz2_smooth_fraction` < 0.5 ~ "Feature",                                                                 `smooth-or-featured-gz2_smooth_fraction` >= 0.5 ~ "Smooth"))
+gz_smoothosh %>% group_by(smoothish) %>% 
+  ggplot() + aes(x=`smooth-or-featured-gz2_total-votes`, colour=smoothish) + geom_histogram()
+```
+
+
+After splitting the galaxies into "Smooth" and "Feature," We select some relative objectivity reasons(variables) that may impact whether the galaxies are smooth or not. We create a data frame to find the importance of these variables. We choose the `smoothish` as the response variable. 
+```{r}
+tree <-rpart(smoothish ~ best_match + sky_separation + ra.y + dec.y + petro_theta + petro_th50 + petro_th90 + elpetro_absmag_r + sersic_nmgy_r + redshift + mag_r, data = gz_smoothosh)
+
+v_importance <- as.data.frame(tree$variable.importance) 
+v_importance
+```
+
+
+From the data frame above, we find the `petro_th50`, `petro_theta`and `petro_th90` are the first three that have larger importance of variable to `smoothish`. So, we will create a classification tree to see the relationship between these three variables and the smoothish form of the `gz_smoothosh` data set.
+```{r}
+tree <-rpart(smoothish ~ petro_theta + petro_th50 + petro_th90, data = gz_smoothosh)
+plot(as.party(tree), gp=gpar(cex=0.6), type="simple")
+```
+
+
+After creating a classification tree to predict how these three input variables (`petro_th50`, `petro_theta`and `petro_th90`) impact the smooth/feature of galaxies, we used `cor()` function to calculate the correlation coefficients between the variables we selected previously. Then, use a pairwise scatter plot to visualize the relationship between each variable. To do this, we need the `corrplot` library.
+```{r}
+library(corrplot)
+cor_result <- gz_smoothosh %>% select(c("petro_theta", "petro_th50", "petro_th90", "best_match", "sky_separation", "ra.y", "dec.y", "sersic_nmgy_r", "redshift")) %>% cor()
+corrplot(cor_result)
+```
+From the pairwise scatter plot that shows the relationship between these variables, we find some dark blue circles focused on the top left. The dark blue circle represents a strong relationship between two variables(almost the same thing). It means the three variables `petro_th50`, `petro_theta` and `petro_th90` have a very strong relationship, so we should choose one to make the classification tree to predict the factor that impacts the smooth/feature in galaxies instead of including all three variables.
+
+
+Based on the result from the pairwise scatter plot, we need to find the other two variables(without the three variable we chose previously) that has the most importance to impact the smooth/feature of galaxies using `variance.importance`.
+```{r}
+tree <-rpart(smoothish ~ best_match + sky_separation + ra.y + dec.y + petro_theta + sersic_nmgy_r + redshift, data = gz_smoothosh)
+
+v_importance <- as.data.frame(tree$variable.importance) 
+v_importance
+```
+From the data frame above, we find that the `petro_theta` and `sersic_nmgy_r`have the more significant variable importance, which means these two variables are more important for the model and can make a more accurate prediction.
+
+
+Step#2: Use r-part to create a classification tree based on selected features 
+
+After we find out the response variable(smoothish) and a set of candidate predictors(petro_theta, sersic_nmgy_r and redshift) in the data set, we create a classification tree based on selected features and visualize this classification tree to make predicts an outcome.
+```{r}
+tree <-rpart(smoothish ~ petro_theta + sersic_nmgy_r + redshift, data = gz_smoothosh)
+plot(as.party(tree), gp=gpar(cex=0.6), type="simple")
+```
+
+
+Step#3: Model evaluation with confusion matrix
+
+We are creating the training and testing datasets from the "gz_smoothosh" data set and fitting a tree using the training data. Finally, we make predictions for new observations and create a confusion matrix to help us analyze the classification tree based on the value of accuracy, sensitivity and specificity, which are calculated from the confusion matrix. 
+```{r}
+gz_smoothosh <- gz_smoothosh %>% rowid_to_column()
+n <- nrow(gz_smoothosh)
+set.seed(99)
+
+training_indices <-sample(1:n, size = round(0.8 * n))
+train <- gz_smoothosh %>% filter(rowid %in% training_indices)
+test <- gz_smoothosh %>% filter(!(rowid %in% training_indices))
+
+tree <-rpart(smoothish ~ petro_theta + sersic_nmgy_r + redshift, data = train)
+tree_pred <- predict(tree, newdata = test)%>%
+  as_tibble()%>%
+  mutate(prediction = ifelse(Smooth >= 0.5, "Predict Smooth", "Predict Feature"))
+table(tree_pred$prediction, test$smoothish)
+```
